@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>【驚艷德瑞】三峰典藏15日</title>
+    
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#ffffff">
+    <!-- 這裡建議換成適合德瑞的 Icon，若無可暫用原本的 -->
+    <!-- <link rel="icon" type="image/png" href="icon.png"> -->
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <style>
+        /* 基礎設定 */
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+        body { background-color: #F5F7FA; -webkit-tap-highlight-color: transparent; font-family: system-ui, -apple-system, sans-serif; }
+        
+        /* 動畫 */
+        .animate-fade-in { animation: fadeIn 0.3s ease-out forwards; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        
+        /* Modal 動畫 */
+        .modal-enter { animation: modalUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        @keyframes modalUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+
+        /* iOS 風格切換開關 (Check-in Toggle) */
+        .toggle-checkbox:checked { right: 0; border-color: #3B82F6; } /* 改為藍色系 */
+        .toggle-checkbox:checked + .toggle-label { background-color: #3B82F6; }
+        
+        /* 玻璃擬態導航列 */
+        .glass-nav {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-top: 1px solid rgba(0,0,0,0.05);
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+        // --- 0. 資料庫設定 (重要：已修改為德瑞專用名稱) ---
+        const DB_NAME = 'GermanySwissTripDB'; // ★ 修改處：避免與九州資料衝突
+        const EXPENSE_KEY = 'germany_expenses'; // ★ 修改處：記帳資料分開存
+
+        const STORE_GPS = 'gps_logs';
+        const STORE_PHOTOS = 'photos';
+        const STORE_CUSTOM_SPOTS = 'custom_spots';
+        const STORE_NOTES = 'spot_notes';
+        const STORE_CHECKINS = 'checkins';
+        const STORE_SPOT_STATUS = 'spot_status';
+
+        const initDB = () => {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open(DB_NAME, 1);
+                request.onerror = (e) => console.error("DB Error", e);
+                request.onupgradeneeded = (event) => {
+                    const db = event.target.result;
+                    if (!db.objectStoreNames.contains(STORE_GPS)) db.createObjectStore(STORE_GPS, { keyPath: 'timestamp' });
+                    if (!db.objectStoreNames.contains(STORE_PHOTOS)) db.createObjectStore(STORE_PHOTOS, { keyPath: 'id' });
+                    if (!db.objectStoreNames.contains(STORE_CUSTOM_SPOTS)) db.createObjectStore(STORE_CUSTOM_SPOTS, { keyPath: 'id', autoIncrement: true });
+                    if (!db.objectStoreNames.contains(STORE_NOTES)) db.createObjectStore(STORE_NOTES, { keyPath: 'id' });
+                    if (!db.objectStoreNames.contains(STORE_CHECKINS)) db.createObjectStore(STORE_CHECKINS, { keyPath: 'id' });
+                    if (!db.objectStoreNames.contains(STORE_SPOT_STATUS)) db.createObjectStore(STORE_SPOT_STATUS, { keyPath: 'id' });
+                };
+                request.onsuccess = (e) => resolve(e.target.result);
+            });
+        };
+
+        // --- 1. 資料庫操作 (保持原樣) ---
+        const dbOps = {
+            put: async (storeName, data) => {
+                const db = await initDB();
+                return new Promise((resolve, reject) => {
+                    const tx = db.transaction(storeName, 'readwrite');
+                    tx.objectStore(storeName).put(data);
+                    tx.oncomplete = () => resolve(true);
+                    tx.onerror = (e) => reject(e);
+                });
+            },
+            get: async (storeName, key) => {
+                const db = await initDB();
+                return new Promise(resolve => {
+                    const req = db.transaction(storeName, 'readonly').objectStore(storeName).get(key);
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => resolve(null);
+                });
+            },
+            getAll: async (storeName) => {
+                const db = await initDB();
+                return new Promise(resolve => {
+                    const req = db.transaction(storeName, 'readonly').objectStore(storeName).getAll();
+                    req.onsuccess = () => resolve(req.result || []);
+                });
+            },
+            
+            saveGPS: async (lat, lng) => dbOps.put(STORE_GPS, { timestamp: Date.now(), lat, lng }),
+            savePhoto: async (id, base64) => dbOps.put(STORE_PHOTOS, { id, image: base64, timestamp: Date.now() }),
+            saveNote: async (id, text) => dbOps.put(STORE_NOTES, { id, text, timestamp: Date.now() }),
+            
+            saveCheckIn: async (id, lat, lng, time) => dbOps.put(STORE_CHECKINS, { id, timestamp: time || Date.now(), lat, lng }),
+            getCheckIn: async (id) => dbOps.get(STORE_CHECKINS, id),
+            deleteCheckIn: async (id) => {
+                 const db = await initDB();
+                 return new Promise(resolve => {
+                     const tx = db.transaction(STORE_CHECKINS, 'readwrite');
+                     tx.objectStore(STORE_CHECKINS).delete(id);
+                     tx.oncomplete = () => resolve(true);
+                 });
+            },
+
+            setSpotStatus: async (id, status) => dbOps.put(STORE_SPOT_STATUS, { id, status }),
+            getSpotStatus: async (id) => dbOps.get(STORE_SPOT_STATUS, id),
+
+            addCustomSpot: async (spot) => {
+                const db = await initDB();
+                return new Promise(resolve => {
+                    const tx = db.transaction(STORE_CUSTOM_SPOTS, 'readwrite');
+                    tx.objectStore(STORE_CUSTOM_SPOTS).add(spot);
+                    tx.oncomplete = () => resolve(true);
+                });
+            },
+            deleteCustomSpot: async (id) => {
+                const db = await initDB();
+                return new Promise(resolve => {
+                    const tx = db.transaction(STORE_CUSTOM_SPOTS, 'readwrite');
+                    tx.objectStore(STORE_CUSTOM_SPOTS).delete(id);
+                    tx.oncomplete = () => resolve(true);
+                });
+            }
+        };
+
+        // --- 2. 德瑞 15 日行程資料 (已替換) ---
+        const tripData = [
+            {
+                day: 1, date: "05/19 (二)", fullDate: "2026-05-19", title: "啟程：飛往法蘭克福", weather: "舒適", image: "./images/1.jpg",
+                locations: [
+                    { time: "22:20", name: "桃園機場 (TPE)", desc: "搭乘華航 CI061 直飛", type: "transport", lat: 25.0797, lng: 121.2342, details: "準備展開15天的德瑞之旅。請提前3小時抵達機場辦理登機手續。" },
+                    { time: "23:00", name: "機上", desc: "養精蓄銳", type: "relax", lat: 0, lng: 0, details: "享受機上娛樂與餐飲，準備迎接歐洲的早晨。" }
+                ]
+            },
+            {
+                day: 2, date: "05/20 (三)", fullDate: "2026-05-20", title: "海德堡與史特拉斯堡", weather: "晴時多雲 18°C", image: "./images/2.jpg",
+                locations: [
+                    { time: "06:50", name: "法蘭克福機場", desc: "抵達德國", type: "transport", lat: 50.0379, lng: 8.5622 },
+                    { time: "10:00", name: "海德堡古城", desc: "世界遺產與大酒桶", type: "spot", tags: ["世界遺產"], link: "https://maps.google.com/?q=Heidelberg+Castle", lat: 49.4106, lng: 8.7153, details: "搭乘纜車上山，參觀著名的巨大酒桶與古堡殘牆，俯瞰內卡河美景。" },
+                    { time: "16:30", name: "史特拉斯堡", desc: "小法國區", type: "spot", tags: ["世界遺產"], link: "https://maps.google.com/?q=Strasbourg", lat: 48.5815, lng: 7.7509, details: "參觀壯麗的哥德式大教堂與迷人的小法國區，感受德法交融的風情。" },
+                    { time: "19:00", name: "Maison Rouge", desc: "五星飯店 Check-in", type: "hotel", tags: ["住宿"], lat: 48.5833, lng: 7.7455, details: "入住史特拉斯堡市中心五星級飯店。" }
+                ]
+            },
+            {
+                day: 3, date: "05/21 (四)", fullDate: "2026-05-21", title: "童話科瑪與伯恩高地", weather: "多雲 16°C", image: "./images/3.jpg",
+                locations: [
+                    { time: "10:00", name: "科瑪 (Colmar)", desc: "霍爾的移動城堡", type: "spot", tags: ["打卡熱點"], link: "https://maps.google.com/?q=Colmar", lat: 48.0742, lng: 7.3562, details: "色彩繽紛的木筋屋與運河，彷彿走進宮崎駿的動畫場景。" },
+                    { time: "15:30", name: "伯恩 (Bern)", desc: "瑞士首都舊城", type: "spot", tags: ["世界遺產"], link: "https://maps.google.com/?q=Bern", lat: 46.9480, lng: 7.4474, details: "漫步在長達6公里的拱廊商店街，參觀鐘塔與熊公園。" },
+                    { time: "18:00", name: "伯恩高地飯店", desc: "連泊第一晚", type: "hotel", tags: ["住宿"], lat: 46.6046, lng: 7.9157, details: "入住少女峰山腳下，準備明日登頂。" }
+                ]
+            },
+            {
+                day: 4, date: "05/22 (五)", fullDate: "2026-05-22", title: "歐洲屋脊：少女峰", weather: "雪/晴 -2°C", image: "./images/4.jpg",
+                locations: [
+                    { time: "09:30", name: "艾格快線", desc: "15分鐘直達冰川", type: "transport", tags: ["纜車"], lat: 46.6236, lng: 8.0268, details: "搭乘最新穎的 Eiger Express 纜車，近距離欣賞艾格峰北壁。" },
+                    { time: "11:00", name: "少女峰觀景台", desc: "Top of Europe", type: "spot", tags: ["必去"], link: "https://maps.google.com/?q=Jungfraujoch", lat: 46.5475, lng: 7.9851, details: "參觀冰宮、斯芬克斯觀景台，在雪地上漫步，並在山頂享用午餐。" },
+                    { time: "19:00", name: "瑞士起司火鍋", desc: "道地風味晚餐", type: "food", tags: ["美食"], lat: 46.6863, lng: 7.8632, details: "體驗傳統的瑞士 Fondue。" }
+                ]
+            },
+            {
+                day: 5, date: "05/23 (六)", fullDate: "2026-05-23", title: "藍湖與黃金列車", weather: "晴朗 20°C", image: "./images/5.jpg",
+                locations: [
+                    { time: "09:30", name: "藍湖 (Blausee)", desc: "阿爾卑斯山的眼淚", type: "spot", tags: ["秘境"], link: "https://maps.google.com/?q=Blausee", lat: 46.5323, lng: 7.6637, details: "湖水清澈見底呈現寶藍色，是絕佳的攝影地點。" },
+                    { time: "12:04", name: "黃金列車", desc: "頭等艙景觀體驗", type: "transport", tags: ["火車"], lat: 46.5562, lng: 7.3739, details: "搭乘 Golden Pass Line 前往蒙投，沿途欣賞葡萄園與雷夢湖景。" },
+                    { time: "15:00", name: "西庸古堡", desc: "雷夢湖畔的水上城堡", type: "spot", tags: ["古蹟"], link: "https://maps.google.com/?q=Chillon+Castle", lat: 46.4142, lng: 6.9275 }
+                ]
+            },
+            {
+                day: 6, date: "05/24 (日)", fullDate: "2026-05-24", title: "白朗峰與策馬特", weather: "晴 12°C", image: "./images/6.jpg",
+                locations: [
+                    { time: "10:00", name: "南針峰", desc: "眺望白朗峰", type: "spot", tags: ["極限"], link: "https://maps.google.com/?q=Aiguille+du+Midi", lat: 45.8794, lng: 6.8875, details: "搭乘纜車直達 3842m，挑戰「步步驚心」玻璃屋，與歐洲最高峰合影。" },
+                    { time: "13:00", name: "夏慕尼", desc: "法式山城午餐", type: "food", lat: 45.9237, lng: 6.8694 },
+                    { time: "18:00", name: "策馬特", desc: "無煙山城 Check-in", type: "hotel", tags: ["住宿"], lat: 46.0207, lng: 7.7491, details: "抵達馬特洪峰腳下的無車小鎮，入住連泊飯店。" }
+                ]
+            },
+            {
+                day: 7, date: "05/25 (一)", fullDate: "2026-05-25", title: "王者風範：馬特洪峰", weather: "晴 10°C", image: "./images/7.jpg",
+                locations: [
+                    { time: "10:00", name: "葛納特觀景台", desc: "全景視野", type: "spot", tags: ["必去"], link: "https://maps.google.com/?q=Gornergrat", lat: 45.9832, lng: 7.7845, details: "搭乘齒軌火車上山，欣賞 29 座 4000 公尺以上的高山群。" },
+                    { time: "13:00", name: "利菲爾湖", desc: "拍攝馬特洪峰倒影", type: "spot", tags: ["健行"], lat: 45.9818, lng: 7.7618, details: "若天氣許可，可健行至湖邊拍攝經典倒影。" },
+                    { time: "15:00", name: "策馬特市區", desc: "自由逛街", type: "shop", lat: 46.0207, lng: 7.7491 }
+                ]
+            },
+            {
+                day: 8, date: "05/26 (二)", fullDate: "2026-05-26", title: "冰河列車與盧森", weather: "多雲 15°C", image: "./images/8.jpg",
+                locations: [
+                    { time: "08:52", name: "冰河列車", desc: "世界最慢特快車", type: "transport", tags: ["必搭"], lat: 46.6322, lng: 8.5946, details: "從策馬特前往安德馬特，透過全景玻璃窗欣賞壯麗景色。" },
+                    { time: "16:00", name: "盧森", desc: "卡貝爾橋與獅子紀念碑", type: "spot", tags: ["名城"], link: "https://maps.google.com/?q=Lucerne", lat: 47.0502, lng: 8.3093 },
+                    { time: "18:00", name: "盧森文華東方", desc: "Mandarin Oriental Palace", type: "hotel", tags: ["奢華"], lat: 47.0545, lng: 8.3168, details: "入住頂級五星級酒店，享受無敵湖景。" }
+                ]
+            },
+            {
+                day: 9, date: "05/27 (三)", fullDate: "2026-05-27", title: "懸崖餐廳與施萬高", weather: "晴 18°C", image: "./images/9.jpg",
+                locations: [
+                    { time: "09:00", name: "飯店時光", desc: "享受無晨喚的早晨", type: "relax", lat: 47.0545, lng: 8.3168 },
+                    { time: "13:00", name: "懸崖餐廳", desc: "Aescher Gasthaus", type: "spot", tags: ["封面景點"], link: "https://maps.google.com/?q=Aescher", lat: 47.2838, lng: 9.4140, details: "國家地理雜誌封面景點，緊貼在垂直峭壁上的餐廳。" },
+                    { time: "18:00", name: "施萬高", desc: "抵達德國", type: "hotel", lat: 47.5755, lng: 10.7371 }
+                ]
+            },
+            {
+                day: 10, date: "05/28 (四)", fullDate: "2026-05-28", title: "童話國王城堡", weather: "多雲 16°C", image: "./images/10.jpg",
+                locations: [
+                    { time: "10:00", name: "新天鵝堡", desc: "迪士尼城堡原型", type: "spot", tags: ["必去"], link: "https://maps.google.com/?q=Neuschwanstein", lat: 47.5576, lng: 10.7498 },
+                    { time: "15:00", name: "林德霍夫堡", desc: "洛可可風格宮殿", type: "spot", lat: 47.5701, lng: 10.9605 },
+                    { time: "19:00", name: "一星米其林晚宴", desc: "Heinz Winkler", type: "food", tags: ["美食"], lat: 47.7812, lng: 12.3364, details: "在特選飯店享用精緻的米其林料理。" }
+                ]
+            },
+            {
+                day: 11, date: "05/29 (五)", fullDate: "2026-05-29", title: "國王湖與慕尼黑", weather: "晴 19°C", image: "./images/11.jpg",
+                locations: [
+                    { time: "11:00", name: "國王湖", desc: "德國最美湖泊", type: "spot", tags: ["遊船"], link: "https://maps.google.com/?q=Königssee", lat: 47.5919, lng: 12.9886, details: "搭乘電動船前往紅蔥頭教堂，欣賞清澈見底的湖水。" },
+                    { time: "17:00", name: "慕尼黑", desc: "瑪莉恩廣場", type: "spot", link: "https://maps.google.com/?q=Marienplatz", lat: 48.1372, lng: 11.5755 },
+                    { time: "19:00", name: "皇家啤酒屋", desc: "HB 豬腳大餐", type: "food", tags: ["氣氛"], lat: 48.1376, lng: 11.5800 }
+                ]
+            },
+            {
+                day: 12, date: "05/30 (六)", fullDate: "2026-05-30", title: "ICE 極速體驗", weather: "晴 22°C", image: "./images/12.jpg",
+                locations: [
+                    { time: "10:00", name: "慕尼黑自由活動", desc: "購物時間", type: "shop", lat: 48.1372, lng: 11.5755, details: "最後採買 RIMOWA、雙人牌刀具等戰利品。" },
+                    { time: "13:51", name: "ICE 快速火車", desc: "前往紐倫堡", type: "transport", lat: 48.1402, lng: 11.5600, details: "體驗時速300公里的德國高鐵。" },
+                    { time: "17:00", name: "羅騰堡", desc: "中世紀珍珠", type: "spot", tags: ["必拍"], link: "https://maps.google.com/?q=Rothenburg", lat: 49.3768, lng: 10.1793, details: "入住保存最完整的古城，彷彿穿越時光。" }
+                ]
+            },
+            {
+                day: 13, date: "05/31 (日)", fullDate: "2026-05-31", title: "羅曼蒂克大道終章", weather: "晴 20°C", image: "./images/13.jpg",
+                locations: [
+                    { time: "09:00", name: "羅騰堡古城", desc: "普雷萊茵廣場", type: "walk", lat: 49.3768, lng: 10.1793 },
+                    { time: "13:00", name: "烏茲堡", desc: "主教宮殿", type: "spot", tags: ["世界遺產"], link: "https://maps.google.com/?q=Würzburg+Residence", lat: 49.7925, lng: 9.9383 },
+                    { time: "18:00", name: "法蘭克福", desc: "旅程終點", type: "hotel", tags: ["住宿"], lat: 50.1109, lng: 8.6821 }
+                ]
+            },
+            {
+                day: 14, date: "06/01 (一)", fullDate: "2026-06-01", title: "再見歐洲", weather: "晴", image: "./images/14.jpg",
+                locations: [
+                    { time: "08:00", name: "法蘭克福機場 (FRA)", desc: "辦理退稅與登機", type: "transport", lat: 50.0379, lng: 8.5622, details: "搭乘 CI062 11:10 班機返回台北。" }
+                ]
+            },
+            {
+                day: 15, date: "06/02 (二)", fullDate: "2026-06-02", title: "抵達溫暖的家", weather: "舒適", image: "https://images.unsplash.com/photo-1526481280693-3bfa7568e0f3?q=80&w=800&auto=format&fit=crop",
+                locations: [
+                    { time: "06:10", name: "桃園機場", desc: "平安抵達", type: "transport", lat: 25.0797, lng: 121.2342 }
+                ]
+            }
+        ];
+
+        // --- 3. 元件 ---
+        const Icon = ({ name, size = 18, className }) => {
+            const [html, setHtml] = useState('');
+            useEffect(() => {
+                if (window.lucide && window.lucide.icons) {
+                    const iconNode = window.lucide.icons[name.split('-').map(p=>p.charAt(0).toUpperCase()+p.slice(1)).join('')] || window.lucide.icons.CircleHelp;
+                    const el = window.lucide.createElement(iconNode);
+                    el.setAttribute('width', size); el.setAttribute('height', size);
+                    if(className) el.setAttribute('class', className);
+                    const t = document.createElement('div'); t.appendChild(el); setHtml(t.innerHTML);
+                }
+            }, [name, size, className]);
+            return <span dangerouslySetInnerHTML={{ __html: html }} className="inline-flex items-center justify-center" />;
+        };
+
+        const ToggleCheckIn = ({ isChecked, onChange }) => (
+            <label className="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" className="sr-only toggle-checkbox" checked={isChecked} onChange={onChange} />
+                <div className={`w-14 h-8 rounded-full shadow-inner transition-colors duration-300 ease-in-out flex items-center px-1 ${isChecked ? 'bg-blue-500' : 'bg-gray-200'}`}>
+                    <div className={`w-6 h-6 bg-white rounded-full shadow-md transform transition-transform duration-300 ease-in-out flex items-center justify-center ${isChecked ? 'translate-x-6' : 'translate-x-0'}`}>
+                        {isChecked ? <Icon name="check" size={14} className="text-blue-500" /> : <Icon name="map-pin" size={14} className="text-gray-400" />}
+                    </div>
+                </div>
+                <span className="ml-2 text-xs font-bold text-gray-500">{isChecked ? '已抵達' : '打卡'}</span>
+            </label>
+        );
+
+        // --- 4. 核心功能: 匯出與資料處理 ---
+        const exportData = async () => {
+            const [gps, photos, customSpots, notes, checkins, spotStatus] = await Promise.all([
+                dbOps.getAll(STORE_GPS), dbOps.getAll(STORE_PHOTOS), dbOps.getAll(STORE_CUSTOM_SPOTS),
+                dbOps.getAll(STORE_NOTES), dbOps.getAll(STORE_CHECKINS), dbOps.getAll(STORE_SPOT_STATUS)
+            ]);
+            const expenses = JSON.parse(localStorage.getItem(EXPENSE_KEY) || '[]');
+
+            let timeline = [];
+            const checkinMap = Object.fromEntries(checkins.map(c => [c.id, c]));
+            const statusMap = Object.fromEntries(spotStatus.map(s => [s.id, s.status]));
+
+            // A. 原本行程
+            tripData.forEach(day => day.locations.forEach(loc => {
+                const id = `${day.day}_${loc.name}`;
+                timeline.push({
+                    ...loc,
+                    id, dayIndex: day.day, isCustom: false,
+                    status: statusMap[id] || 'active',
+                    checkIn: checkinMap[id] || null
+                });
+            }));
+
+            // B. 自訂行程
+            customSpots.forEach(spot => {
+                const id = `${spot.dayIndex}_${spot.name}`;
+                timeline.push({
+                    ...spot,
+                    id, isCustom: true,
+                    status: 'active',
+                    checkIn: checkinMap[id] || null
+                });
+            });
+
+            // C. 排序
+            timeline.sort((a, b) => {
+                if (a.dayIndex !== b.dayIndex) return a.dayIndex - b.dayIndex;
+                const timeA = a.checkIn ? new Date(a.checkIn.timestamp).toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'}) : a.time;
+                const timeB = b.checkIn ? new Date(b.checkIn.timestamp).toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'}) : b.time;
+                return (timeA || '23:59').localeCompare(timeB || '23:59');
+            });
+
+            const data = { 
+                meta: { title: "驚艷德瑞15日", exportTime: new Date().toLocaleString() },
+                timeline, gps, photos, notes, expenses,
+                raw: { customSpots, checkins, spotStatus } 
+            };
+            
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+            const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `germany_swiss_full_backup_${new Date().toISOString().slice(0,10)}.json`; a.click();
+        };
+
+        // --- 5. Location Card ---
+        const LocationCard = ({ loc, day, userLocation, onExpense, onUpdate }) => {
+            const [isExpanded, setIsExpanded] = useState(false);
+            const [photo, setPhoto] = useState(null);
+            const [note, setNote] = useState('');
+            const [showNoteInput, setShowNoteInput] = useState(false);
+            const [checkIn, setCheckIn] = useState(null);
+            const [expense, setExpense] = useState(null);
+            
+            const spotId = loc.id || `${day}_${loc.name}`;
+            const isHotel = loc.type === 'hotel';
+
+            useEffect(() => {
+                const load = async () => {
+                    const [p, n, c] = await Promise.all([
+                        dbOps.get(STORE_PHOTOS, spotId),
+                        dbOps.get(STORE_NOTES, spotId),
+                        dbOps.getCheckIn(spotId)
+                    ]);
+                    setPhoto(p?.image);
+                    setNote(n?.text || '');
+                    setCheckIn(c);
+                    const allExp = JSON.parse(localStorage.getItem(EXPENSE_KEY) || '[]');
+                    const exp = allExp.find(e => e.location === loc.name);
+                    setExpense(exp);
+                };
+                load();
+            }, [spotId, loc.name]);
+
+            const handleCheckInToggle = async (e) => {
+                const checked = e.target.checked;
+                if (checked) {
+                    const now = Date.now();
+                    const lat = userLocation?.lat || loc.lat;
+                    const lng = userLocation?.lng || loc.lng;
+                    await dbOps.saveCheckIn(spotId, lat, lng, now);
+                    setCheckIn({ timestamp: now, lat, lng });
+                } else {
+                    if(confirm('確定要取消打卡紀錄嗎？')) {
+                        await dbOps.deleteCheckIn(spotId);
+                        setCheckIn(null);
+                    }
+                }
+            };
+
+            const tryImplicitCheckIn = async () => {
+                if (!checkIn) {
+                    const now = Date.now();
+                    const lat = userLocation?.lat || loc.lat;
+                    const lng = userLocation?.lng || loc.lng;
+                    await dbOps.saveCheckIn(spotId, lat, lng, now);
+                    setCheckIn({ timestamp: now, lat, lng });
+                }
+            };
+
+            const handlePhoto = async (e) => {
+                if (e.target.files?.[0]) {
+                    const reader = new FileReader();
+                    reader.onload = async (ev) => {
+                        await dbOps.savePhoto(spotId, ev.target.result);
+                        setPhoto(ev.target.result);
+                        tryImplicitCheckIn();
+                    };
+                    reader.readAsDataURL(e.target.files[0]);
+                }
+            };
+
+            const handleNoteSave = async () => {
+                await dbOps.saveNote(spotId, note);
+                setShowNoteInput(false);
+                tryImplicitCheckIn();
+            };
+
+            const handleDelete = async () => {
+                if (loc.isCustom) {
+                    if(confirm('確定要永久刪除此自訂景點嗎？')) {
+                        await dbOps.deleteCustomSpot(loc.rawId);
+                        onUpdate();
+                    }
+                } else {
+                    await dbOps.setSpotStatus(spotId, 'cancelled');
+                    onUpdate();
+                }
+            };
+            
+            const handleRestore = async () => {
+                await dbOps.setSpotStatus(spotId, 'active');
+                onUpdate();
+            };
+
+            const isCancelled = loc.status === 'cancelled';
+            const displayTime = checkIn 
+                ? new Date(checkIn.timestamp).toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'}) 
+                : loc.time;
+
+            if (isCancelled) {
+                return (
+                    <div className="bg-gray-100 p-4 rounded-xl border border-dashed border-gray-300 flex justify-between items-center opacity-70">
+                        <span className="text-gray-400 line-through text-sm">{loc.time} {loc.name}</span>
+                        <button onClick={handleRestore} className="text-blue-500 text-xs font-bold border border-blue-200 px-2 py-1 rounded">復原</button>
+                    </div>
+                );
+            }
+
+            // 樣式：飯店使用靛藍色，自訂景點使用橘色，一般景點使用白色
+            let cardStyle = "border-gray-100";
+            if (isHotel) cardStyle = "border-indigo-200 bg-indigo-50/30";
+            else if (loc.isCustom) cardStyle = "border-orange-200 bg-orange-50/20";
+
+            return (
+                <div className={`bg-white p-4 rounded-2xl shadow-sm border relative transition-all duration-300 ${cardStyle}`}>
+                    <div className="flex justify-between items-start mb-3">
+                        <div className="flex items-center gap-3">
+                            <div className={`p-2 rounded-xl ${checkIn ? 'bg-blue-100 text-blue-600' : isHotel ? 'bg-indigo-100 text-indigo-500' : 'bg-gray-100 text-gray-500'}`}>
+                                <Icon name={isHotel ? 'bed' : loc.type === 'food' ? 'utensils' : loc.type === 'shop' ? 'shopping-bag' : loc.type === 'transport' ? 'train' : 'map-pin'} size={18} />
+                            </div>
+                            <div>
+                                <div className={`font-mono text-xl font-bold ${checkIn ? 'text-blue-600' : isHotel ? 'text-indigo-900' : 'text-gray-800'}`}>
+                                    {displayTime}
+                                </div>
+                                <div className="text-[10px] text-gray-400 font-bold tracking-wider">{checkIn ? 'ACTUAL' : 'PLANNED'}</div>
+                            </div>
+                        </div>
+                        <ToggleCheckIn isChecked={!!checkIn} onChange={handleCheckInToggle} />
+                    </div>
+
+                    <div className="mb-2">
+                         <h3 className={`text-lg font-bold ${isHotel ? 'text-indigo-900' : 'text-gray-800'}`}>{loc.name}</h3>
+                         <p className="text-gray-500 text-sm">{loc.desc}</p>
+                    </div>
+
+                    <div className="flex gap-2 mb-4">
+                        <button onClick={() => setShowNoteInput(!showNoteInput)} className={`flex-1 py-2 rounded-lg border flex items-center justify-center gap-1 text-sm font-bold transition-colors ${note ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-gray-50 text-gray-500 border-gray-100'}`}>
+                            <Icon name="pencil" size={14} /> 筆記
+                        </button>
+                        <button onClick={() => onExpense(loc.name)} className={`flex-1 py-2 rounded-lg border flex items-center justify-center gap-1 text-sm font-bold transition-colors ${expense ? 'bg-green-50 text-green-600 border-green-200' : 'bg-gray-50 text-gray-500 border-gray-100'}`}>
+                            <Icon name="wallet" size={14} /> {expense ? `€${expense.amount}` : '記帳'}
+                        </button>
+                        <label className={`flex-1 py-2 rounded-lg border flex items-center justify-center gap-1 text-sm font-bold transition-colors cursor-pointer ${photo ? 'bg-red-50 text-red-500 border-red-100' : 'bg-gray-50 text-gray-500 border-gray-100'}`}>
+                            <input type="file" accept="image/*" className="hidden" onChange={handlePhoto} />
+                            <Icon name="camera" size={14} /> {photo ? '已拍' : '拍照'}
+                        </label>
+                    </div>
+
+                    {showNoteInput && (
+                        <div className="mb-3 animate-fade-in">
+                            <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="記錄當下心情..." className="w-full p-3 bg-gray-50 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-100" rows="3"></textarea>
+                            <div className="flex justify-end gap-2 mt-2">
+                                <button onClick={() => setShowNoteInput(false)} className="text-gray-400 text-xs px-2">取消</button>
+                                <button onClick={handleNoteSave} className="bg-blue-500 text-white px-3 py-1 rounded-lg text-xs font-bold">儲存</button>
+                            </div>
+                        </div>
+                    )}
+
+                    {note && !showNoteInput && (
+                        <div onClick={() => setShowNoteInput(true)} className="mb-3 p-3 bg-yellow-50 border border-yellow-100 rounded-xl text-sm text-gray-700 italic flex gap-2">
+                            <Icon name="quote" size={12} className="text-yellow-400 shrink-0 mt-1" />
+                            {note}
+                        </div>
+                    )}
+
+                    {photo && (
+                        <div className="mb-3 relative rounded-xl overflow-hidden shadow-sm group">
+                            <img src={photo} className="w-full h-40 object-cover" />
+                            <div className="absolute top-2 right-2 bg-black/50 text-white text-xs px-2 py-1 rounded-full backdrop-blur-sm">已存檔</div>
+                        </div>
+                    )}
+
+                    <div className="flex justify-between items-center pt-2 border-t border-gray-50">
+                        <div className="flex gap-2">
+                            {loc.link && <a href={loc.link} target="_blank" className="text-blue-500 text-xs font-bold flex items-center gap-1"><Icon name="navigation" size={12}/> 導航</a>}
+                            {loc.details && <button onClick={() => setIsExpanded(!isExpanded)} className="text-gray-400 text-xs flex items-center gap-1">詳情 <Icon name={isExpanded?"chevron-up":"chevron-down"} size={12}/></button>}
+                        </div>
+                        <button onClick={handleDelete} className="text-gray-300 hover:text-red-400 p-1">
+                            <Icon name="trash-2" size={14} />
+                        </button>
+                    </div>
+
+                    {isExpanded && <div className="mt-3 text-sm text-gray-600 leading-relaxed animate-fade-in">{loc.details}</div>}
+                </div>
+            );
+        };
+
+        // --- 6. Tab: 行程頁 ---
+        const TabItinerary = ({ activeDay, setActiveDay, userLocation, onExpense }) => {
+            const [mergedList, setMergedList] = useState([]);
+            const [isSpotModalOpen, setIsSpotModalOpen] = useState(false);
+            const currentTrip = tripData.find(t => t.day === activeDay);
+
+            const loadData = useCallback(async () => {
+                const [customSpots, spotStatus, checkins] = await Promise.all([
+                    dbOps.getAll(STORE_CUSTOM_SPOTS),
+                    dbOps.getAll(STORE_SPOT_STATUS),
+                    dbOps.getAll(STORE_CHECKINS)
+                ]);
+                
+                const staticList = currentTrip.locations.map(loc => {
+                    const id = `${activeDay}_${loc.name}`;
+                    const statusObj = spotStatus.find(s => s.id === id);
+                    return { ...loc, id, isCustom: false, status: statusObj?.status || 'active' };
+                });
+
+                const dayCustom = customSpots.filter(s => s.dayIndex === activeDay).map(s => ({
+                    ...s, id: `${activeDay}_${s.name}`, rawId: s.id, isCustom: true, status: 'active'
+                }));
+
+                const all = [...staticList, ...dayCustom].sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+                setMergedList(all);
+            }, [activeDay, currentTrip]);
+
+            useEffect(() => { loadData(); }, [loadData]);
+
+            return (
+                <div className="pb-24">
+                    <div className="relative h-64 w-full">
+                        <img src={currentTrip.image} className="w-full h-full object-cover" />
+                        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent"></div>
+                        <div className="absolute bottom-4 left-5 right-5 text-white">
+                            <div className="flex items-center gap-2 mb-1 opacity-90 text-sm font-bold">
+                                <span className="bg-white/20 backdrop-blur-md px-2 py-0.5 rounded text-xs">{currentTrip.date}</span>
+                                <span>{currentTrip.weather}</span>
+                            </div>
+                            <h2 className="text-3xl font-bold shadow-sm">{currentTrip.title}</h2>
+                        </div>
+                    </div>
+
+                    <div className="sticky top-0 z-30 bg-[#F5F7FA]/95 backdrop-blur-sm shadow-sm pt-2 pb-2">
+                        <div className="flex overflow-x-auto gap-2 px-4 pb-2 scrollbar-hide">
+                            {tripData.map(d => (
+                                <button key={d.day} onClick={() => setActiveDay(d.day)} data-day={d.day}
+                                    className={`flex-shrink-0 w-12 h-14 rounded-xl flex flex-col items-center justify-center transition-all ${activeDay === d.day ? 'bg-blue-600 text-white shadow-lg scale-105' : 'bg-white text-gray-400 border'}`}>
+                                    <span className="text-[10px] font-bold">D{d.day}</span>
+                                    <span className="text-lg font-bold">{d.date.split(' ')[0].split('/')[1]}</span>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="px-4 mt-6 space-y-6">
+                        {mergedList.map((loc) => (
+                            <LocationCard key={loc.id} loc={loc} day={activeDay} userLocation={userLocation} onExpense={onExpense} onUpdate={loadData} />
+                        ))}
+                    </div>
+
+                    <button onClick={() => setIsSpotModalOpen(true)} className="fixed bottom-24 right-5 bg-blue-600 text-white w-14 h-14 rounded-full shadow-2xl flex items-center justify-center z-40 active:scale-90 transition-transform">
+                        <Icon name="plus" size={28} />
+                    </button>
+
+                    <AddSpotModal isOpen={isSpotModalOpen} onClose={() => setIsSpotModalOpen(false)} dayIndex={activeDay} onAdded={loadData} />
+                </div>
+            );
+        };
+
+        // --- 7. Modals ---
+        const AddSpotModal = ({ isOpen, onClose, dayIndex, onAdded }) => {
+            const [name, setName] = useState('');
+            const [time, setTime] = useState('12:00');
+            
+            const handleSave = async () => {
+                if(!name) return;
+                await dbOps.addCustomSpot({ name, time, type: 'custom', desc: '手動新增', dayIndex, isCustom: true });
+                onAdded(); onClose(); setName('');
+            };
+            if(!isOpen) return null;
+            return (
+                <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 backdrop-blur-sm" onClick={onClose}>
+                    <div className="bg-white w-full p-6 rounded-t-3xl modal-enter" onClick={e=>e.stopPropagation()}>
+                        <h3 className="text-xl font-bold mb-4">新增 D{dayIndex} 景點</h3>
+                        <input type="time" value={time} onChange={e=>setTime(e.target.value)} className="w-full bg-gray-100 p-3 rounded-xl mb-3 font-mono"/>
+                        <input type="text" placeholder="景點名稱" value={name} onChange={e=>setName(e.target.value)} className="w-full bg-gray-100 p-3 rounded-xl mb-6" autoFocus/>
+                        <button onClick={handleSave} className="w-full bg-blue-600 text-white py-3 rounded-xl font-bold">新增</button>
+                    </div>
+                </div>
+            );
+        };
+
+        const ExpenseModal = ({ isOpen, onClose, defaultName }) => {
+            const [amount, setAmount] = useState('');
+            const [name, setName] = useState('');
+            const [history, setHistory] = useState([]);
+
+            useEffect(() => { 
+                if(isOpen) {
+                    setName(defaultName || '');
+                    const all = JSON.parse(localStorage.getItem(EXPENSE_KEY) || '[]');
+                    if(defaultName) setHistory(all.filter(e => e.location === defaultName));
+                }
+            }, [isOpen, defaultName]);
+
+            const handleSave = () => {
+                if(!amount || !name) return;
+                const newItem = { id: Date.now(), name, amount: parseInt(amount), date: new Date().toLocaleDateString(), location: defaultName || name };
+                const all = JSON.parse(localStorage.getItem(EXPENSE_KEY) || '[]');
+                localStorage.setItem(EXPENSE_KEY, JSON.stringify([newItem, ...all]));
+                onClose(); setAmount('');
+            };
+
+            if(!isOpen) return null;
+            return (
+                <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 backdrop-blur-sm" onClick={onClose}>
+                    <div className="bg-white w-full p-6 rounded-t-3xl modal-enter max-h-[80vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-xl font-bold flex items-center gap-2"><Icon name="wallet"/> 記帳 (€)</h3>
+                            <button onClick={onClose}><Icon name="x"/></button>
+                        </div>
+                        
+                        {history.length > 0 && (
+                            <div className="mb-4 bg-yellow-50 p-3 rounded-xl">
+                                <div className="text-xs text-yellow-600 font-bold mb-2">此景點已記錄：</div>
+                                {history.map(h => (
+                                    <div key={h.id} className="flex justify-between text-sm border-b border-yellow-100 last:border-0 py-1">
+                                        <span>{h.name}</span>
+                                        <span className="font-mono">€{h.amount}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        <input type="text" placeholder="項目 (如: 門票)" value={name} onChange={e=>setName(e.target.value)} className="w-full bg-gray-100 p-3 rounded-xl mb-3 font-bold"/>
+                        <input type="number" placeholder="€ 金額 (歐元)" value={amount} onChange={e=>setAmount(e.target.value)} className="w-full bg-gray-100 p-3 rounded-xl mb-6 font-mono text-xl" autoFocus/>
+                        <button onClick={handleSave} className="w-full bg-green-500 text-white py-3 rounded-xl font-bold">儲存紀錄</button>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- 8. App Root ---
+        const App = () => {
+            const [activeTab, setActiveTab] = useState('itinerary');
+            const [activeDay, setActiveDay] = useState(1);
+            const [userLocation, setUserLocation] = useState(null);
+            const [expenseModal, setExpenseModal] = useState({ isOpen: false, name: '' });
+
+            useEffect(() => {
+                const now = new Date();
+                const currentMD = `${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+                const dayMatch = tripData.find(d => d.fullDate.endsWith(currentMD));
+                
+                if (dayMatch) {
+                    setActiveDay(dayMatch.day);
+                    setTimeout(() => {
+                        const btn = document.querySelector(`button[data-day="${dayMatch.day}"]`);
+                        if(btn) btn.scrollIntoView({ behavior: 'smooth', inline: 'center' });
+                    }, 100);
+                }
+            }, []);
+
+            useEffect(() => {
+                if (navigator.geolocation) {
+                    const watcher = navigator.geolocation.watchPosition(
+                        (p) => {
+                            const { latitude, longitude } = p.coords;
+                            setUserLocation({ lat: latitude, lng: longitude });
+                            dbOps.saveGPS(latitude, longitude).catch(e => console.error("GPS Save Fail", e));
+                        },
+                        (err) => console.error("GPS Error", err),
+                        { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+                    );
+                    return () => navigator.geolocation.clearWatch(watcher);
+                }
+            }, []);
+
+            return (
+                <div className="max-w-md mx-auto min-h-screen bg-[#F5F7FA] relative shadow-2xl overflow-hidden">
+                    {activeTab === 'itinerary' && (
+                        <TabItinerary 
+                            activeDay={activeDay} 
+                            setActiveDay={setActiveDay} 
+                            userLocation={userLocation} 
+                            onExpense={(name) => setExpenseModal({ isOpen: true, name })}
+                        />
+                    )}
+                    
+                    {activeTab === 'budget' && (
+                        <div className="p-5 pt-12">
+                            <h2 className="text-3xl font-bold mb-4">德瑞消費統計</h2>
+                            <div className="bg-green-500 text-white p-6 rounded-3xl shadow-lg mb-6 text-center">
+                                <div className="text-sm opacity-80">總支出</div>
+                                <div className="text-4xl font-mono font-bold">
+                                    €{JSON.parse(localStorage.getItem(EXPENSE_KEY) || '[]').reduce((a,c)=>a+c.amount,0).toLocaleString()}
+                                </div>
+                            </div>
+                            <div className="space-y-2">
+                                {JSON.parse(localStorage.getItem(EXPENSE_KEY) || '[]').map(e => (
+                                    <div key={e.id} className="bg-white p-3 rounded-xl flex justify-between shadow-sm">
+                                        <span>{e.name}</span>
+                                        <span className="font-mono">€{e.amount}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {activeTab === 'info' && (
+                        <div className="p-5 pt-12">
+                            <h2 className="text-2xl font-bold mb-6">設定與匯出</h2>
+                            <button onClick={exportData} className="w-full bg-blue-600 text-white p-4 rounded-xl font-bold shadow-lg flex items-center justify-center gap-2 mb-4">
+                                <Icon name="download"/> 匯出完整回憶 (JSON)
+                            </button>
+                            <p className="text-sm text-gray-400 text-center">包含所有行程、打卡紀錄、照片與軌跡</p>
+                        </div>
+                    )}
+
+                    <div className="fixed bottom-0 left-0 right-0 glass-nav z-50 max-w-md mx-auto pb-safe">
+                        <div className="flex justify-around items-center py-3">
+                            <button onClick={()=>setActiveTab('itinerary')} className={`flex flex-col items-center gap-1 ${activeTab==='itinerary'?'text-blue-600':'text-gray-400'}`}>
+                                <Icon name="map" size={24}/> <span className="text-[10px]">行程</span>
+                            </button>
+                            <button onClick={()=>setActiveTab('budget')} className={`flex flex-col items-center gap-1 ${activeTab==='budget'?'text-blue-600':'text-gray-400'}`}>
+                                <Icon name="wallet" size={24}/> <span className="text-[10px]">記帳</span>
+                            </button>
+                            <button onClick={()=>setActiveTab('info')} className={`flex flex-col items-center gap-1 ${activeTab==='info'?'text-blue-600':'text-gray-400'}`}>
+                                <Icon name="settings" size={24}/> <span className="text-[10px]">設定</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <ExpenseModal isOpen={expenseModal.isOpen} defaultName={expenseModal.name} onClose={()=>setExpenseModal({isOpen:false, name:''})} />
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

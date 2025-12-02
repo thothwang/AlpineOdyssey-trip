@@ -1,0 +1,15 @@
+{
+  "name": "驚艷德瑞：三峰典藏15日",
+  "short_name": "德瑞15日",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#F5F7FA",
+  "theme_color": "#2563EB",
+  "icons": [
+    {
+      "src": "./icon.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
